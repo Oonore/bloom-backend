@@ -36,6 +36,7 @@ const gmailTransporter = (GMAIL_USER && GMAIL_APP_PASS)
       host:   "smtp.gmail.com",
       port:   587,
       secure: false,       // TLS — Gmail requires this on port 587
+      family: 4,           // Force IPv4 — Render's IPv6 routing can't reach Gmail
       auth:   { user: GMAIL_USER, pass: GMAIL_APP_PASS },
     })
   : null;
