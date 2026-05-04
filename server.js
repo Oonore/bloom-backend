@@ -13,12 +13,12 @@ const BACKEND_URL  = process.env.BACKEND_URL  || "https://bloom-backend-v55a.onr
 const CF_BASE      = process.env.CF_ENV === "prod"
   ? "https://api.cashfree.com/pg"
   : "https://sandbox.cashfree.com/pg";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://bloom-store-ochre.vercel.app";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://bloomhq.in";
 const PORT         = process.env.PORT         || 3001;
 
 // ─── RAZORPAY CONFIG ──────────────────────────────────────────────────────────
-const RZP_KEY_ID     = process.env.RZP_KEY_ID;      // rzp_test_... or rzp_live_...
-const RZP_KEY_SECRET = process.env.RZP_KEY_SECRET;
+const RZP_KEY_ID     = process.env.RAZORPAY_KEY_ID     || process.env.RZP_KEY_ID;
+const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || process.env.RZP_KEY_SECRET;
 const RZP_WEBHOOK_SECRET = process.env.RZP_WEBHOOK_SECRET || RZP_KEY_SECRET;
 const RZP_BASE       = "https://api.razorpay.com/v1";
 
