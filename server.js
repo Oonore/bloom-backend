@@ -2,7 +2,7 @@ const express    = require("express");
 const cors       = require("cors");
 const crypto     = require("crypto");
 const fetch      = require("node-fetch");
-const nodemailer = require("nodemailer");
+// nodemailer removed — Render blocks outbound SMTP ports
 
 const app = express();
 
@@ -23,23 +23,11 @@ const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || process.env.RZP_KEY_SE
 const RZP_WEBHOOK_SECRET = process.env.RZP_WEBHOOK_SECRET || RZP_KEY_SECRET;
 const RZP_BASE       = "https://api.razorpay.com/v1";
 
-// ─── GMAIL SMTP CONFIG ────────────────────────────────────────────────────────
-// Set these two env vars on Render:
-//   GMAIL_USER         → the Gmail address to send from  (e.g. orders.bloom@gmail.com)
-//   GMAIL_APP_PASSWORD → 16-char App Password from Google account settings
-const GMAIL_USER     = process.env.GMAIL_USER;
-const GMAIL_APP_PASS = process.env.GMAIL_APP_PASSWORD;
-
-// Create transporter once (reused across requests)
-const gmailTransporter = (GMAIL_USER && GMAIL_APP_PASS)
-  ? nodemailer.createTransport({
-      host:   "smtp.gmail.com",
-      port:   587,
-      secure: false,       // TLS — Gmail requires this on port 587
-      family: 4,           // Force IPv4 — Render's IPv6 routing can't reach Gmail
-      auth:   { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-    })
-  : null;
+// ─── RESEND CONFIG ────────────────────────────────────────────────────────────
+// Resend uses HTTPS (port 443) — works on Render, no domain verification needed
+// Sign up free at resend.com → get API key → add RESEND_KEY on Render
+// Free tier: 3,000 emails/month, 100/day
+const RESEND_KEY = process.env.RESEND_KEY;
 
 const CF_HEADERS = {
   "Content-Type":    "application/json",
@@ -468,62 +456,70 @@ function buildOrderEmailHtml({ storeName, order, deliveryAddress }) {
     </div>`;
 }
 
-// ─── SEND ORDER EMAIL via Gmail SMTP (nodemailer) ─────────────────────────────
+// ─── SEND ORDER EMAIL via Resend (HTTPS — works on Render) ───────────────────
 async function sendOrderNotificationEmail({ toEmail, toName, storeName, order, deliveryAddress }) {
-  console.log(`📧 Email → to: ${toEmail || "❌ MISSING"} | gmail: ${GMAIL_USER || "❌ NOT SET"}`);
+  console.log(`📧 Email → to: ${toEmail || "❌ MISSING"} | resend key: ${RESEND_KEY ? "SET" : "❌ NOT SET"}`);
 
-  if (!toEmail) {
-    console.error("❌ No recipient email — storeEmail not passed from frontend");
-    return;
-  }
-  if (!gmailTransporter) {
-    console.error("❌ Gmail not configured — set GMAIL_USER + GMAIL_APP_PASSWORD on Render");
-    return;
-  }
+  if (!toEmail) { console.error("❌ No recipient email"); return; }
+  if (!RESEND_KEY) { console.error("❌ RESEND_KEY not set on Render"); return; }
 
   try {
     const html    = buildOrderEmailHtml({ storeName, order, deliveryAddress });
     const subject = `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`;
 
-    const info = await gmailTransporter.sendMail({
-      from:    `"Bloom Orders" <${GMAIL_USER}>`,
-      to:      toEmail,
-      subject,
-      html,
+    const res = await fetch("https://api.resend.com/emails", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({
+        from:    "Bloom Orders <onboarding@resend.dev>",  // works on free tier without domain setup
+        to:      [toEmail],
+        subject,
+        html,
+      }),
     });
 
-    console.log(`✅ Email sent to ${toEmail} | messageId: ${info.messageId}`);
+    const body = await res.json();
+    if (res.ok) {
+      console.log(`✅ Email sent to ${toEmail} | id: ${body.id}`);
+    } else {
+      console.error(`❌ Resend error ${res.status}:`, JSON.stringify(body));
+    }
   } catch (e) {
-    console.error(`❌ Email send failed: ${e.message}`);
+    console.error(`❌ Email failed: ${e.message}`);
   }
 }
 
 // ─── TEST EMAIL ENDPOINT ───────────────────────────────────────────────────────
-// Call this after setting env vars to verify email works:
-// curl -X POST https://bloom-backend-v55a.onrender.com/api/test-email \
-//   -H "Content-Type: application/json" -d '{"to":"your@email.com"}'
 app.post("/api/test-email", async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: "Provide 'to' in body" });
 
-  if (!gmailTransporter) {
+  if (!RESEND_KEY) {
     return res.status(500).json({
-      error: "Gmail not configured",
-      fix:   "Add GMAIL_USER and GMAIL_APP_PASSWORD to Render environment variables",
+      error: "RESEND_KEY not set",
+      fix:   "Sign up at resend.com → get API key → add RESEND_KEY on Render",
     });
   }
 
   try {
-    const info = await gmailTransporter.sendMail({
-      from:    `"Bloom Test" <${GMAIL_USER}>`,
-      to,
-      subject: "🌸 Bloom Email Test",
-      html:    `<p style="font-family:sans-serif;font-size:15px;">✅ Email is working! Sent from <strong>${GMAIL_USER}</strong> via Bloom.</p>`,
+    const r = await fetch("https://api.resend.com/emails", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({
+        from:    "Bloom Orders <onboarding@resend.dev>",
+        to:      [to],
+        subject: "🌸 Bloom Email Test",
+        html:    `<p style="font-family:sans-serif;font-size:15px;">✅ Bloom email is working! Order notifications will arrive here.</p>`,
+      }),
     });
-    console.log(`🧪 Test email sent to ${to} | ${info.messageId}`);
-    return res.json({ success: true, messageId: info.messageId, note: "Check inbox + spam folder" });
+    const body = await r.json();
+    if (r.ok) {
+      console.log(`🧪 Test email sent to ${to} | id: ${body.id}`);
+      return res.json({ success: true, id: body.id, note: "Check inbox + spam" });
+    } else {
+      return res.status(r.status).json({ success: false, error: body });
+    }
   } catch (e) {
-    console.error("Test email failed:", e.message);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -558,7 +554,6 @@ app.listen(PORT, () => {
   console.log(`   Cashfree: ${CF_BASE}`);
   console.log(`   Razorpay: ${RZP_KEY_ID ? "✅ configured" : "❌ RZP_KEY_ID missing"}`);
   console.log(`   Frontend: ${FRONTEND_URL}`);
-  console.log(`   Email user: ${GMAIL_USER    ? `✅ ${GMAIL_USER}` : "❌ GMAIL_USER missing — emails will not send"}`);
-  console.log(`   Email pass: ${GMAIL_APP_PASS ? "✅ GMAIL_APP_PASSWORD set" : "❌ GMAIL_APP_PASSWORD missing"}`);
+  console.log(`   Resend key: ${RESEND_KEY ? "✅ RESEND_KEY set" : "❌ RESEND_KEY missing — emails will not send"}`);
   console.log(`   Supabase: ${process.env.SUPA_URL ? "✅ SUPA_URL set" : "❌ SUPA_URL missing"}`);
 });
