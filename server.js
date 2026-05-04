@@ -22,6 +22,10 @@ const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || process.env.RZP_KEY_SE
 const RZP_WEBHOOK_SECRET = process.env.RZP_WEBHOOK_SECRET || RZP_KEY_SECRET;
 const RZP_BASE       = "https://api.razorpay.com/v1";
 
+// ─── MAILERSEND CONFIG (platform-level — one key for all stores) ──────────────
+const MS_KEY  = process.env.MAILERSEND_KEY;
+const MS_FROM = process.env.MAILERSEND_FROM || "orders@bloomhq.in"; // verified sender
+
 const CF_HEADERS = {
   "Content-Type":    "application/json",
   "x-client-id":     CF_APP_ID,
@@ -259,8 +263,19 @@ app.post("/api/rzp-verify", async (req, res) => {
       await updateOrderInSupabase(bloomOrderId, {
         status:     "confirmed",
         payment_id: razorpay_payment_id,
-        amount:     Math.round(amount / 100), // convert paise → rupees
+        amount:     Math.round(amount / 100),
       });
+
+      // Send email notification to store owner (platform-level, no per-store key needed)
+      const info = await getStoreByOrderId(bloomOrderId);
+      if (info?.store?.email) {
+        await sendOrderNotificationEmail({
+          toEmail:   info.store.email,
+          toName:    info.store.name,
+          storeName: info.store.store_name,
+          order:     { ...info.order, id: bloomOrderId },
+        });
+      }
     }
 
     console.log(`✅ Razorpay: Payment verified — ${razorpay_payment_id} for order ${bloomOrderId}`);
@@ -304,6 +319,17 @@ app.post("/api/rzp-webhook", async (req, res) => {
           payment_id: paymentId,
           amount:     Math.round(amountPaise / 100),
         });
+
+        // Email store owner
+        const info = await getStoreByOrderId(bloomOrderId);
+        if (info?.store?.email) {
+          await sendOrderNotificationEmail({
+            toEmail:   info.store.email,
+            toName:    info.store.name,
+            storeName: info.store.store_name,
+            order:     { ...info.order, id: bloomOrderId },
+          });
+        }
         console.log(`✅ Razorpay webhook: Order ${bloomOrderId} confirmed — ₹${amountPaise / 100}`);
       }
     }
@@ -318,6 +344,75 @@ app.post("/api/rzp-webhook", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 //  SHARED HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
+
+// ─── FETCH STORE OWNER FROM SUPABASE ─────────────────────────────────────────
+async function getStoreByOrderId(bloomOrderId) {
+  const SUPA_URL = process.env.SUPA_URL;
+  const SUPA_KEY = process.env.SUPA_KEY;
+  if (!SUPA_URL || !SUPA_KEY) return null;
+  try {
+    // Get the order first to find store_id
+    const orderRes = await fetch(
+      `${SUPA_URL}/rest/v1/bloom_orders?id=eq.${encodeURIComponent(bloomOrderId)}&select=store_id,customer_name,amount,items,order_date`,
+      { headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}` } }
+    );
+    const orders = await orderRes.json();
+    if (!orders?.length) return null;
+    const order = orders[0];
+
+    // Get the store owner's details
+    const storeRes = await fetch(
+      `${SUPA_URL}/rest/v1/bloom_users?id=eq.${encodeURIComponent(order.store_id)}&select=email,name,store_name`,
+      { headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}` } }
+    );
+    const stores = await storeRes.json();
+    if (!stores?.length) return null;
+    return { store: stores[0], order };
+  } catch (e) {
+    console.error("getStoreByOrderId error:", e);
+    return null;
+  }
+}
+
+// ─── SEND ORDER EMAIL (platform MailerSend account) ───────────────────────────
+async function sendOrderNotificationEmail({ toEmail, toName, storeName, order }) {
+  if (!MS_KEY) { console.warn("MAILERSEND_KEY not set — skipping email"); return; }
+  try {
+    const itemList = Array.isArray(order.items)
+      ? order.items.map(i => `${i.name} × ${i.qty} — ₹${(i.price * i.qty).toLocaleString("en-IN")}`).join("<br>")
+      : "See order details";
+
+    const html = `
+      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#fff;">
+        <div style="background:linear-gradient(135deg,#FFD6E7,#FFF3CD);padding:24px;border-radius:14px;text-align:center;margin-bottom:24px;">
+          <h1 style="margin:0;font-size:28px;color:#2D1F2B;">🌸 New Order!</h1>
+          <p style="margin:8px 0 0;color:#7C5C72;font-size:15px;">You have a new order on <strong>${storeName}</strong></p>
+        </div>
+        <div style="background:#F9F5FF;border-radius:10px;padding:20px;margin-bottom:20px;">
+          <p style="margin:0 0 8px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">ORDER DETAILS</p>
+          <p style="margin:0 0 6px;font-size:15px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
+          <p style="margin:0 0 6px;font-size:15px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
+          <p style="margin:0 0 6px;font-size:15px;"><strong>Items:</strong><br>${itemList}</p>
+          <p style="margin:12px 0 0;font-size:20px;font-weight:700;color:#C85A8A;">Total: ₹${Number(order.amount || 0).toLocaleString("en-IN")}</p>
+        </div>
+        <p style="font-size:13px;color:#999;text-align:center;">Log in to your <a href="https://bloomhq.in" style="color:#C85A8A;">Bloom dashboard</a> to manage this order.</p>
+      </div>`;
+
+    await fetch("https://api.mailersend.com/v1/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MS_KEY}` },
+      body: JSON.stringify({
+        from: { email: MS_FROM, name: "Bloom" },
+        to:   [{ email: toEmail, name: toName || storeName }],
+        subject: `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`,
+        html,
+      }),
+    });
+    console.log(`📧 Order email sent to ${toEmail} for order ${order.id}`);
+  } catch (e) {
+    console.error("Email send error:", e);
+  }
+}
 
 async function updateOrderInSupabase(bloomOrderId, updates) {
   const SUPA_URL = process.env.SUPA_URL;
