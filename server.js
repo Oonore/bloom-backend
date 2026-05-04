@@ -471,7 +471,7 @@ async function sendOrderNotificationEmail({ toEmail, toName, storeName, order, d
       method:  "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
       body: JSON.stringify({
-        from:    "Bloom Orders <onboarding@resend.dev>",  // works on free tier without domain setup
+        from:    "Bloom Orders <orders@bloomhq.in>",
         to:      [toEmail],
         subject,
         html,
