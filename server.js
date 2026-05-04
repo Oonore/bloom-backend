@@ -1,7 +1,8 @@
-const express  = require("express");
-const cors     = require("cors");
-const crypto   = require("crypto");
-const fetch    = require("node-fetch");
+const express    = require("express");
+const cors       = require("cors");
+const crypto     = require("crypto");
+const fetch      = require("node-fetch");
+const nodemailer = require("nodemailer");
 
 const app = express();
 
@@ -22,9 +23,22 @@ const RZP_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || process.env.RZP_KEY_SE
 const RZP_WEBHOOK_SECRET = process.env.RZP_WEBHOOK_SECRET || RZP_KEY_SECRET;
 const RZP_BASE       = "https://api.razorpay.com/v1";
 
-// ─── MAILERSEND CONFIG (platform-level — one key for all stores) ──────────────
-const MS_KEY  = process.env.MAILERSEND_KEY;
-const MS_FROM = process.env.MAILERSEND_FROM || "orders@bloomhq.in"; // verified sender
+// ─── GMAIL SMTP CONFIG ────────────────────────────────────────────────────────
+// Set these two env vars on Render:
+//   GMAIL_USER         → the Gmail address to send from  (e.g. orders.bloom@gmail.com)
+//   GMAIL_APP_PASSWORD → 16-char App Password from Google account settings
+const GMAIL_USER     = process.env.GMAIL_USER;
+const GMAIL_APP_PASS = process.env.GMAIL_APP_PASSWORD;
+
+// Create transporter once (reused across requests)
+const gmailTransporter = (GMAIL_USER && GMAIL_APP_PASS)
+  ? nodemailer.createTransport({
+      host:   "smtp.gmail.com",
+      port:   587,
+      secure: false,       // TLS — Gmail requires this on port 587
+      auth:   { user: GMAIL_USER, pass: GMAIL_APP_PASS },
+    })
+  : null;
 
 const CF_HEADERS = {
   "Content-Type":    "application/json",
@@ -405,103 +419,111 @@ async function getStoreByOrderId(bloomOrderId) {
   }
 }
 
-// ─── SEND ORDER EMAIL (platform MailerSend account) ───────────────────────────
+// ─── BUILD EMAIL HTML ─────────────────────────────────────────────────────────
+function buildOrderEmailHtml({ storeName, order, deliveryAddress }) {
+  const itemList = Array.isArray(order.items)
+    ? order.items.map(i =>
+        `<tr>
+          <td style="padding:8px 0;font-size:14px;color:#2D1F2B;">${i.name} × ${i.qty}</td>
+          <td style="padding:8px 0;font-size:14px;font-weight:700;text-align:right;color:#2D1F2B;">
+            ₹${(Number(i.price || 0) * i.qty).toLocaleString("en-IN")}
+          </td>
+        </tr>`).join("")
+    : `<tr><td colspan="2" style="font-size:14px;padding:8px 0;">See order details</td></tr>`;
+
+  const addrBlock = deliveryAddress
+    ? `<div style="background:#F0F9FF;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+        <p style="margin:0 0 8px;font-size:12px;color:#888;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">📦 Delivery Address</p>
+        <p style="margin:0;font-size:14px;line-height:1.8;color:#2D1F2B;">${deliveryAddress}</p>
+       </div>`
+    : "";
+
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;padding:32px 24px;background:#fff;">
+      <div style="background:linear-gradient(135deg,#FFD6E7,#FFF3CD);padding:24px;border-radius:14px;text-align:center;margin-bottom:24px;">
+        <h1 style="margin:0;font-size:26px;color:#2D1F2B;">🌸 New Order!</h1>
+        <p style="margin:10px 0 0;color:#7C5C72;font-size:15px;">
+          You have a new order on <strong>${storeName}</strong>
+        </p>
+      </div>
+      <div style="background:#F9F5FF;border-radius:10px;padding:20px;margin-bottom:20px;">
+        <p style="margin:0 0 10px;font-size:12px;color:#888;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">🧾 Order Details</p>
+        <p style="margin:0 0 4px;font-size:14px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
+        <p style="margin:0 0 16px;font-size:14px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
+        <table style="width:100%;border-collapse:collapse;border-top:1px solid #e0d0f0;">
+          ${itemList}
+          <tr style="border-top:2px solid #E8A0BE;">
+            <td style="padding:10px 0;font-size:15px;font-weight:700;">Total</td>
+            <td style="padding:10px 0;font-size:20px;font-weight:700;color:#C85A8A;text-align:right;">
+              ₹${Number(order.amount || 0).toLocaleString("en-IN")}
+            </td>
+          </tr>
+        </table>
+      </div>
+      ${addrBlock}
+      <p style="font-size:13px;color:#aaa;text-align:center;margin-top:24px;">
+        Log in to your <a href="https://bloomhq.in" style="color:#C85A8A;">Bloom dashboard</a> to manage this order.
+      </p>
+    </div>`;
+}
+
+// ─── SEND ORDER EMAIL via Gmail SMTP (nodemailer) ─────────────────────────────
 async function sendOrderNotificationEmail({ toEmail, toName, storeName, order, deliveryAddress }) {
-  console.log(`📧 Email attempt → to: ${toEmail || "MISSING"} | from: ${MS_FROM} | key: ${MS_KEY ? "SET" : "❌ MISSING"}`);
-  if (!MS_KEY) { console.error("❌ MAILERSEND_KEY env var not set on Render — cannot send email"); return; }
-  if (!toEmail) { console.error("❌ No recipient email (storeEmail was undefined) — cannot send email"); return; }
+  console.log(`📧 Email → to: ${toEmail || "❌ MISSING"} | gmail: ${GMAIL_USER || "❌ NOT SET"}`);
+
+  if (!toEmail) {
+    console.error("❌ No recipient email — storeEmail not passed from frontend");
+    return;
+  }
+  if (!gmailTransporter) {
+    console.error("❌ Gmail not configured — set GMAIL_USER + GMAIL_APP_PASSWORD on Render");
+    return;
+  }
 
   try {
-    const itemList = Array.isArray(order.items)
-      ? order.items.map(i => `<tr><td style="padding:6px 0;font-size:14px;">${i.name} × ${i.qty}</td><td style="padding:6px 0;font-size:14px;font-weight:700;text-align:right;">₹${(Number(i.price||0) * i.qty).toLocaleString("en-IN")}</td></tr>`).join("")
-      : `<tr><td colspan="2" style="font-size:14px;">See order details</td></tr>`;
+    const html    = buildOrderEmailHtml({ storeName, order, deliveryAddress });
+    const subject = `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`;
 
-    const addrBlock = deliveryAddress
-      ? `<div style="background:#F0F9FF;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
-          <p style="margin:0 0 8px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">📦 DELIVERY ADDRESS</p>
-          <p style="margin:0;font-size:14px;line-height:1.7;color:#2D1F2B;">${deliveryAddress}</p>
-         </div>`
-      : "";
-
-    const html = `
-      <div style="font-family:sans-serif;max-width:540px;margin:0 auto;padding:32px 24px;background:#fff;">
-        <div style="background:linear-gradient(135deg,#FFD6E7,#FFF3CD);padding:24px;border-radius:14px;text-align:center;margin-bottom:24px;">
-          <h1 style="margin:0;font-size:28px;color:#2D1F2B;">🌸 New Order!</h1>
-          <p style="margin:8px 0 0;color:#7C5C72;font-size:15px;">You have a new order on <strong>${storeName}</strong></p>
-        </div>
-        <div style="background:#F9F5FF;border-radius:10px;padding:20px;margin-bottom:20px;">
-          <p style="margin:0 0 12px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">🧾 ORDER DETAILS</p>
-          <p style="margin:0 0 6px;font-size:14px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
-          <p style="margin:0 0 14px;font-size:14px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
-          <table style="width:100%;border-collapse:collapse;border-top:1px solid #eee;">
-            ${itemList}
-            <tr style="border-top:2px solid #E8A0BE;">
-              <td style="padding:10px 0;font-size:16px;font-weight:700;">Total</td>
-              <td style="padding:10px 0;font-size:20px;font-weight:700;color:#C85A8A;text-align:right;">₹${Number(order.amount || 0).toLocaleString("en-IN")}</td>
-            </tr>
-          </table>
-        </div>
-        ${addrBlock}
-        <p style="font-size:13px;color:#999;text-align:center;">Log in to your <a href="https://bloomhq.in" style="color:#C85A8A;">Bloom dashboard</a> to manage this order.</p>
-      </div>`;
-
-    const msRes = await fetch("https://api.mailersend.com/v1/email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MS_KEY}` },
-      body: JSON.stringify({
-        from: { email: MS_FROM, name: "Bloom" },
-        to:   [{ email: toEmail, name: toName || storeName || "Store Owner" }],
-        subject: `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`,
-        html,
-      }),
+    const info = await gmailTransporter.sendMail({
+      from:    `"Bloom Orders" <${GMAIL_USER}>`,
+      to:      toEmail,
+      subject,
+      html,
     });
 
-    // ⬇️  ALWAYS read the response — this is how we know if email actually sent
-    const msBody = await msRes.text();
-    if (msRes.ok) {
-      console.log(`✅ Email sent to ${toEmail} for order ${order.id} (status ${msRes.status})`);
-    } else {
-      console.error(`❌ MailerSend FAILED — status ${msRes.status} — body: ${msBody}`);
-      // Common causes:
-      // 401 → MAILERSEND_KEY is wrong
-      // 422 → Domain bloomhq.in not verified in MailerSend, OR trial account can't send to this recipient
-      // 429 → Rate limited
-    }
+    console.log(`✅ Email sent to ${toEmail} | messageId: ${info.messageId}`);
   } catch (e) {
-    console.error("Email network error:", e.message);
+    console.error(`❌ Email send failed: ${e.message}`);
   }
 }
 
 // ─── TEST EMAIL ENDPOINT ───────────────────────────────────────────────────────
-// Hit this manually to check if MailerSend config is working:
+// Call this after setting env vars to verify email works:
 // curl -X POST https://bloom-backend-v55a.onrender.com/api/test-email \
-//   -H "Content-Type: application/json" \
-//   -d '{"to":"your@email.com"}'
+//   -H "Content-Type: application/json" -d '{"to":"your@email.com"}'
 app.post("/api/test-email", async (req, res) => {
   const { to } = req.body;
-  if (!to) return res.status(400).json({ error: "Provide 'to' email in body" });
-  console.log(`🧪 Test email requested to ${to}`);
-  try {
-    if (!MS_KEY) return res.status(500).json({ error: "MAILERSEND_KEY not set on server" });
+  if (!to) return res.status(400).json({ error: "Provide 'to' in body" });
 
-    const msRes = await fetch("https://api.mailersend.com/v1/email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MS_KEY}` },
-      body: JSON.stringify({
-        from: { email: MS_FROM, name: "Bloom Test" },
-        to:   [{ email: to, name: "Test Recipient" }],
-        subject: "🌸 Bloom Email Test",
-        html: `<p style="font-family:sans-serif;">If you can read this, MailerSend is configured correctly! Sent from <strong>${MS_FROM}</strong>.</p>`,
-      }),
+  if (!gmailTransporter) {
+    return res.status(500).json({
+      error: "Gmail not configured",
+      fix:   "Add GMAIL_USER and GMAIL_APP_PASSWORD to Render environment variables",
     });
-    const body = await msRes.text();
-    if (msRes.ok) {
-      return res.json({ success: true, status: msRes.status, note: "Email dispatched — check your inbox + spam" });
-    } else {
-      return res.status(msRes.status).json({ success: false, status: msRes.status, mailersendError: body });
-    }
+  }
+
+  try {
+    const info = await gmailTransporter.sendMail({
+      from:    `"Bloom Test" <${GMAIL_USER}>`,
+      to,
+      subject: "🌸 Bloom Email Test",
+      html:    `<p style="font-family:sans-serif;font-size:15px;">✅ Email is working! Sent from <strong>${GMAIL_USER}</strong> via Bloom.</p>`,
+    });
+    console.log(`🧪 Test email sent to ${to} | ${info.messageId}`);
+    return res.json({ success: true, messageId: info.messageId, note: "Check inbox + spam folder" });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    console.error("Test email failed:", e.message);
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -535,7 +557,7 @@ app.listen(PORT, () => {
   console.log(`   Cashfree: ${CF_BASE}`);
   console.log(`   Razorpay: ${RZP_KEY_ID ? "✅ configured" : "❌ RZP_KEY_ID missing"}`);
   console.log(`   Frontend: ${FRONTEND_URL}`);
-  console.log(`   Email key: ${MS_KEY ? "✅ MAILERSEND_KEY set" : "❌ MAILERSEND_KEY MISSING — emails will not send"}`);
-  console.log(`   Email from: ${MS_FROM}`);
+  console.log(`   Email user: ${GMAIL_USER    ? `✅ ${GMAIL_USER}` : "❌ GMAIL_USER missing — emails will not send"}`);
+  console.log(`   Email pass: ${GMAIL_APP_PASS ? "✅ GMAIL_APP_PASSWORD set" : "❌ GMAIL_APP_PASSWORD missing"}`);
   console.log(`   Supabase: ${process.env.SUPA_URL ? "✅ SUPA_URL set" : "❌ SUPA_URL missing"}`);
 });
