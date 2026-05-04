@@ -506,7 +506,7 @@ app.post("/api/test-email", async (req, res) => {
       method:  "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
       body: JSON.stringify({
-        from:    "Bloom Orders <onboarding@resend.dev>",
+        from:    "Bloom Orders <orders@bloomhq.in>",
         to:      [to],
         subject: "🌸 Bloom Email Test",
         html:    `<p style="font-family:sans-serif;font-size:15px;">✅ Bloom email is working! Order notifications will arrive here.</p>`,
