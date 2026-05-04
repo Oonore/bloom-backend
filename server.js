@@ -238,14 +238,17 @@ app.post("/api/rzp-verify", async (req, res) => {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
-      bloomOrderId,     // our internal BL-XXXX order ID
-      amount,           // in paise
-      storeEmail,       // store owner email — passed directly from frontend
-      storeName,        // store name — for the notification email
-      ownerName,        // store owner name
-      customerName,     // customer name — for email body
-      items,            // ordered items array
+      bloomOrderId,      // our internal BL-XXXX order ID
+      amount,            // in paise
+      storeEmail,        // store owner email — passed directly from frontend
+      storeName,         // store name — for the notification email
+      ownerName,         // store owner name
+      customerName,      // customer name — for email body
+      items,             // ordered items array
+      deliveryAddress,   // customer's shipping address (optional)
     } = req.body;
+
+    console.log(`📨 rzp-verify received: orderId=${bloomOrderId} | storeEmail=${storeEmail || "NOT PROVIDED"} | storeName=${storeName || "—"}`);
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({ error: "Missing Razorpay payment details" });
@@ -280,6 +283,7 @@ app.post("/api/rzp-verify", async (req, res) => {
           toEmail:   storeEmail,
           toName:    ownerName || storeName,
           storeName: storeName || "Bloom Store",
+          deliveryAddress: deliveryAddress || null,
           order: {
             id:            bloomOrderId,
             customer_name: customerName || "Customer",
@@ -288,15 +292,19 @@ app.post("/api/rzp-verify", async (req, res) => {
           },
         });
       } else {
+        console.warn("⚠️  storeEmail not provided — falling back to Supabase lookup");
         // Fallback: fetch store info from Supabase if frontend didn't send it
         const info = await getStoreByOrderId(bloomOrderId);
         if (info?.store?.email) {
           await sendOrderNotificationEmail({
-            toEmail:   info.store.email,
-            toName:    info.store.name,
-            storeName: info.store.store_name,
-            order:     { ...info.order, id: bloomOrderId },
+            toEmail:         info.store.email,
+            toName:          info.store.name,
+            storeName:       info.store.store_name,
+            deliveryAddress: deliveryAddress || null,
+            order:           { ...info.order, id: bloomOrderId },
           });
+        } else {
+          console.error("❌ Could not find store email — no email sent for order", bloomOrderId);
         }
       }
     }
@@ -398,44 +406,104 @@ async function getStoreByOrderId(bloomOrderId) {
 }
 
 // ─── SEND ORDER EMAIL (platform MailerSend account) ───────────────────────────
-async function sendOrderNotificationEmail({ toEmail, toName, storeName, order }) {
-  if (!MS_KEY) { console.warn("MAILERSEND_KEY not set — skipping email"); return; }
+async function sendOrderNotificationEmail({ toEmail, toName, storeName, order, deliveryAddress }) {
+  console.log(`📧 Email attempt → to: ${toEmail || "MISSING"} | from: ${MS_FROM} | key: ${MS_KEY ? "SET" : "❌ MISSING"}`);
+  if (!MS_KEY) { console.error("❌ MAILERSEND_KEY env var not set on Render — cannot send email"); return; }
+  if (!toEmail) { console.error("❌ No recipient email (storeEmail was undefined) — cannot send email"); return; }
+
   try {
     const itemList = Array.isArray(order.items)
-      ? order.items.map(i => `${i.name} × ${i.qty} — ₹${(i.price * i.qty).toLocaleString("en-IN")}`).join("<br>")
-      : "See order details";
+      ? order.items.map(i => `<tr><td style="padding:6px 0;font-size:14px;">${i.name} × ${i.qty}</td><td style="padding:6px 0;font-size:14px;font-weight:700;text-align:right;">₹${(Number(i.price||0) * i.qty).toLocaleString("en-IN")}</td></tr>`).join("")
+      : `<tr><td colspan="2" style="font-size:14px;">See order details</td></tr>`;
+
+    const addrBlock = deliveryAddress
+      ? `<div style="background:#F0F9FF;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+          <p style="margin:0 0 8px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">📦 DELIVERY ADDRESS</p>
+          <p style="margin:0;font-size:14px;line-height:1.7;color:#2D1F2B;">${deliveryAddress}</p>
+         </div>`
+      : "";
 
     const html = `
-      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#fff;">
+      <div style="font-family:sans-serif;max-width:540px;margin:0 auto;padding:32px 24px;background:#fff;">
         <div style="background:linear-gradient(135deg,#FFD6E7,#FFF3CD);padding:24px;border-radius:14px;text-align:center;margin-bottom:24px;">
           <h1 style="margin:0;font-size:28px;color:#2D1F2B;">🌸 New Order!</h1>
           <p style="margin:8px 0 0;color:#7C5C72;font-size:15px;">You have a new order on <strong>${storeName}</strong></p>
         </div>
         <div style="background:#F9F5FF;border-radius:10px;padding:20px;margin-bottom:20px;">
-          <p style="margin:0 0 8px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">ORDER DETAILS</p>
-          <p style="margin:0 0 6px;font-size:15px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
-          <p style="margin:0 0 6px;font-size:15px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
-          <p style="margin:0 0 6px;font-size:15px;"><strong>Items:</strong><br>${itemList}</p>
-          <p style="margin:12px 0 0;font-size:20px;font-weight:700;color:#C85A8A;">Total: ₹${Number(order.amount || 0).toLocaleString("en-IN")}</p>
+          <p style="margin:0 0 12px;font-size:13px;color:#888;font-weight:700;letter-spacing:.06em;">🧾 ORDER DETAILS</p>
+          <p style="margin:0 0 6px;font-size:14px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
+          <p style="margin:0 0 14px;font-size:14px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
+          <table style="width:100%;border-collapse:collapse;border-top:1px solid #eee;">
+            ${itemList}
+            <tr style="border-top:2px solid #E8A0BE;">
+              <td style="padding:10px 0;font-size:16px;font-weight:700;">Total</td>
+              <td style="padding:10px 0;font-size:20px;font-weight:700;color:#C85A8A;text-align:right;">₹${Number(order.amount || 0).toLocaleString("en-IN")}</td>
+            </tr>
+          </table>
         </div>
+        ${addrBlock}
         <p style="font-size:13px;color:#999;text-align:center;">Log in to your <a href="https://bloomhq.in" style="color:#C85A8A;">Bloom dashboard</a> to manage this order.</p>
       </div>`;
 
-    await fetch("https://api.mailersend.com/v1/email", {
+    const msRes = await fetch("https://api.mailersend.com/v1/email", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MS_KEY}` },
       body: JSON.stringify({
         from: { email: MS_FROM, name: "Bloom" },
-        to:   [{ email: toEmail, name: toName || storeName }],
+        to:   [{ email: toEmail, name: toName || storeName || "Store Owner" }],
         subject: `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`,
         html,
       }),
     });
-    console.log(`📧 Order email sent to ${toEmail} for order ${order.id}`);
+
+    // ⬇️  ALWAYS read the response — this is how we know if email actually sent
+    const msBody = await msRes.text();
+    if (msRes.ok) {
+      console.log(`✅ Email sent to ${toEmail} for order ${order.id} (status ${msRes.status})`);
+    } else {
+      console.error(`❌ MailerSend FAILED — status ${msRes.status} — body: ${msBody}`);
+      // Common causes:
+      // 401 → MAILERSEND_KEY is wrong
+      // 422 → Domain bloomhq.in not verified in MailerSend, OR trial account can't send to this recipient
+      // 429 → Rate limited
+    }
   } catch (e) {
-    console.error("Email send error:", e);
+    console.error("Email network error:", e.message);
   }
 }
+
+// ─── TEST EMAIL ENDPOINT ───────────────────────────────────────────────────────
+// Hit this manually to check if MailerSend config is working:
+// curl -X POST https://bloom-backend-v55a.onrender.com/api/test-email \
+//   -H "Content-Type: application/json" \
+//   -d '{"to":"your@email.com"}'
+app.post("/api/test-email", async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: "Provide 'to' email in body" });
+  console.log(`🧪 Test email requested to ${to}`);
+  try {
+    if (!MS_KEY) return res.status(500).json({ error: "MAILERSEND_KEY not set on server" });
+
+    const msRes = await fetch("https://api.mailersend.com/v1/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${MS_KEY}` },
+      body: JSON.stringify({
+        from: { email: MS_FROM, name: "Bloom Test" },
+        to:   [{ email: to, name: "Test Recipient" }],
+        subject: "🌸 Bloom Email Test",
+        html: `<p style="font-family:sans-serif;">If you can read this, MailerSend is configured correctly! Sent from <strong>${MS_FROM}</strong>.</p>`,
+      }),
+    });
+    const body = await msRes.text();
+    if (msRes.ok) {
+      return res.json({ success: true, status: msRes.status, note: "Email dispatched — check your inbox + spam" });
+    } else {
+      return res.status(msRes.status).json({ success: false, status: msRes.status, mailersendError: body });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 async function updateOrderInSupabase(bloomOrderId, updates) {
   const SUPA_URL = process.env.SUPA_URL;
@@ -465,6 +533,9 @@ async function updateOrderInSupabase(bloomOrderId, updates) {
 app.listen(PORT, () => {
   console.log(`🌸 Bloom Backend running on port ${PORT}`);
   console.log(`   Cashfree: ${CF_BASE}`);
-  console.log(`   Razorpay: ${RZP_KEY_ID ? "✅ configured" : "⚠️  RZP_KEY_ID missing"}`);
+  console.log(`   Razorpay: ${RZP_KEY_ID ? "✅ configured" : "❌ RZP_KEY_ID missing"}`);
   console.log(`   Frontend: ${FRONTEND_URL}`);
+  console.log(`   Email key: ${MS_KEY ? "✅ MAILERSEND_KEY set" : "❌ MAILERSEND_KEY MISSING — emails will not send"}`);
+  console.log(`   Email from: ${MS_FROM}`);
+  console.log(`   Supabase: ${process.env.SUPA_URL ? "✅ SUPA_URL set" : "❌ SUPA_URL missing"}`);
 });
