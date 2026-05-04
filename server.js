@@ -240,6 +240,11 @@ app.post("/api/rzp-verify", async (req, res) => {
       razorpay_signature,
       bloomOrderId,     // our internal BL-XXXX order ID
       amount,           // in paise
+      storeEmail,       // store owner email — passed directly from frontend
+      storeName,        // store name — for the notification email
+      ownerName,        // store owner name
+      customerName,     // customer name — for email body
+      items,            // ordered items array
     } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
@@ -258,23 +263,41 @@ app.post("/api/rzp-verify", async (req, res) => {
       return res.status(400).json({ error: "Payment signature verification failed" });
     }
 
+    const amountINR = Math.round(amount / 100);
+
     // Signature valid — confirm order in Supabase
     if (bloomOrderId) {
       await updateOrderInSupabase(bloomOrderId, {
         status:     "confirmed",
         payment_id: razorpay_payment_id,
-        amount:     Math.round(amount / 100),
+        amount:     amountINR,
       });
 
-      // Send email notification to store owner (platform-level, no per-store key needed)
-      const info = await getStoreByOrderId(bloomOrderId);
-      if (info?.store?.email) {
+      // Send email notification to store owner
+      // Prefer store info passed directly from frontend (avoids extra DB call)
+      if (storeEmail) {
         await sendOrderNotificationEmail({
-          toEmail:   info.store.email,
-          toName:    info.store.name,
-          storeName: info.store.store_name,
-          order:     { ...info.order, id: bloomOrderId },
+          toEmail:   storeEmail,
+          toName:    ownerName || storeName,
+          storeName: storeName || "Bloom Store",
+          order: {
+            id:            bloomOrderId,
+            customer_name: customerName || "Customer",
+            amount:        amountINR,
+            items:         items || [],
+          },
         });
+      } else {
+        // Fallback: fetch store info from Supabase if frontend didn't send it
+        const info = await getStoreByOrderId(bloomOrderId);
+        if (info?.store?.email) {
+          await sendOrderNotificationEmail({
+            toEmail:   info.store.email,
+            toName:    info.store.name,
+            storeName: info.store.store_name,
+            order:     { ...info.order, id: bloomOrderId },
+          });
+        }
       }
     }
 
