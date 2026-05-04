@@ -279,6 +279,11 @@ app.post("/api/rzp-verify", async (req, res) => {
         amount:     amountINR,
       });
 
+      // Decrement stock for every purchased item
+      if (items?.length) {
+        await decrementProductStock(items);
+      }
+
       // Send email notification to store owner
       // Prefer store info passed directly from frontend (avoids extra DB call)
       if (storeEmail) {
@@ -353,6 +358,10 @@ app.post("/api/rzp-webhook", async (req, res) => {
           payment_id: paymentId,
           amount:     Math.round(amountPaise / 100),
         });
+
+        // Decrement stock from webhook too (covers edge cases)
+        const orderItems = payment.notes?.items ? JSON.parse(payment.notes.items) : null;
+        if (orderItems?.length) await decrementProductStock(orderItems);
 
         // Email store owner
         const info = await getStoreByOrderId(bloomOrderId);
@@ -523,6 +532,37 @@ app.post("/api/test-email", async (req, res) => {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
+
+// ─── DECREMENT PRODUCT STOCK ──────────────────────────────────────────────────
+// Called after payment confirmed — reduces stock for each purchased item
+async function decrementProductStock(items) {
+  const SUPA_URL = process.env.SUPA_URL;
+  const SUPA_KEY = process.env.SUPA_KEY;
+  if (!SUPA_URL || !SUPA_KEY || !items?.length) return;
+  for (const item of items) {
+    if (!item.id || !item.qty) continue;
+    try {
+      const r = await fetch(
+        `${SUPA_URL}/rest/v1/bloom_products?id=eq.${encodeURIComponent(item.id)}&select=id,stock`,
+        { headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}` } }
+      );
+      const rows = await r.json();
+      if (!rows?.length) continue;
+      const newStock = Math.max(0, (rows[0].stock || 0) - (item.qty || 1));
+      await fetch(
+        `${SUPA_URL}/rest/v1/bloom_products?id=eq.${encodeURIComponent(item.id)}`,
+        {
+          method:  "PATCH",
+          headers: { apikey: SUPA_KEY, Authorization: `Bearer ${SUPA_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ stock: newStock }),
+        }
+      );
+      console.log(`📦 Stock: ${item.name || item.id} → ${newStock} remaining`);
+    } catch (e) {
+      console.error("Stock decrement error:", e.message);
+    }
+  }
+}
 
 async function updateOrderInSupabase(bloomOrderId, updates) {
   const SUPA_URL = process.env.SUPA_URL;
