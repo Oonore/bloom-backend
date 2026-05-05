@@ -25,6 +25,32 @@ const RESEND_KEY = process.env.RESEND_KEY;
 // Free credits on signup; DLT registration required for production transactional SMS
 const FAST2SMS_KEY = process.env.FAST2SMS_KEY;
 
+// ─── DB AUTO-MIGRATION ────────────────────────────────────────────────────────
+// Adds any missing columns to bloom_users on every startup (IF NOT EXISTS = safe to re-run).
+// Requires DATABASE_URL env var on Render (get it from Supabase → Settings → Database → URI).
+if (process.env.DATABASE_URL) {
+  try {
+    const { Pool } = require("pg");
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+    });
+    pool.query(`
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS instagram     text;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS phone         text;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS shipping_cost integer DEFAULT 0;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS dispatch_days text    DEFAULT '3-5 days';
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS mailersend_key text;
+    `)
+      .then(() => { console.log("✅ bloom_users schema up to date"); pool.end(); })
+      .catch(e  => { console.error("⚠️  DB migration failed:", e.message);  pool.end(); });
+  } catch (e) {
+    console.error("⚠️  pg not available:", e.message);
+  }
+} else {
+  console.warn("⚠️  DATABASE_URL not set — skipping auto-migration (add it on Render)");
+}
+
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
 
