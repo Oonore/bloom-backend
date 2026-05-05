@@ -35,7 +35,7 @@ app.use((req, res, next) => {
     req.on("data", chunk => raw += chunk);
     req.on("end", () => { req.rawBody = raw; next(); });
   } else {
-    express.json()(req, res, next);
+    express.json({ limit: "10mb" })(req, res, next);
   }
 });
 
