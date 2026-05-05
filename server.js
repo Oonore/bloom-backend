@@ -465,6 +465,128 @@ async function updateOrderInSupabase(bloomOrderId, updates) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  DATA PROXY — all writes go through here so the service-role key bypasses RLS
+// ══════════════════════════════════════════════════════════════════════════════
+
+function sh() {
+  const key = process.env.SUPA_KEY;
+  return {
+    apikey:        key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+  };
+}
+function su() { return process.env.SUPA_URL; }
+
+// ─── PATCH bloom_users ────────────────────────────────────────────────────────
+app.patch("/api/user/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_users?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    return res.json({ success: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── POST bloom_users (signup) ────────────────────────────────────────────────
+app.post("/api/user", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_users`,
+      { method:"POST", headers:{...sh(),"Prefer":"return=representation"}, body:JSON.stringify(req.body) }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── POST bloom_products ──────────────────────────────────────────────────────
+app.post("/api/product", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_products`,
+      { method:"POST", headers:{...sh(),"Prefer":"return=representation"}, body:JSON.stringify(req.body) }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── PATCH bloom_products ─────────────────────────────────────────────────────
+app.patch("/api/product/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_products?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    return res.json({ success: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── DELETE bloom_products ────────────────────────────────────────────────────
+app.delete("/api/product/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_products?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"DELETE", headers:sh() }
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    return res.json({ success: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── POST bloom_orders ────────────────────────────────────────────────────────
+app.post("/api/order", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_orders`,
+      { method:"POST", headers:{...sh(),"Prefer":"return=representation"}, body:JSON.stringify(req.body) }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── PATCH bloom_orders ───────────────────────────────────────────────────────
+app.patch("/api/order/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_orders?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    return res.json({ success: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── POST bloom_customers ─────────────────────────────────────────────────────
+app.post("/api/customer", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_customers`,
+      { method:"POST", headers:{...sh(),"Prefer":"return=representation"}, body:JSON.stringify(req.body) }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
 // ─── START ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🌸 Bloom Backend running on port ${PORT}`);
