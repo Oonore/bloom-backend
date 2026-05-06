@@ -36,11 +36,13 @@ if (process.env.DATABASE_URL) {
       ssl: { rejectUnauthorized: false },
     });
     pool.query(`
-      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS instagram     text;
-      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS phone         text;
-      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS shipping_cost integer DEFAULT 0;
-      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS dispatch_days text    DEFAULT '3-5 days';
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS instagram      text;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS phone          text;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS shipping_cost  integer DEFAULT 0;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS dispatch_days  text    DEFAULT '3-5 days';
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS mailersend_key text;
+      ALTER TABLE bloom_products ADD COLUMN IF NOT EXISTS is_pinned   boolean DEFAULT false;
+      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS instagram   text;
     `)
       .then(() => { console.log("✅ bloom_users schema up to date"); pool.end(); })
       .catch(e  => { console.error("⚠️  DB migration failed:", e.message);  pool.end(); });
@@ -347,39 +349,61 @@ async function getStoreByOrderId(bloomOrderId) {
 // ─── BUILD EMAIL HTML ─────────────────────────────────────────────────────────
 function buildOrderEmailHtml({ storeName, order, deliveryAddress }) {
   const itemList = Array.isArray(order.items)
-    ? order.items.map(i =>
-        `<tr>
-          <td style="padding:8px 0;font-size:14px;color:#2D1F2B;">${i.name} × ${i.qty}</td>
-          <td style="padding:8px 0;font-size:14px;font-weight:700;text-align:right;color:#2D1F2B;">
+    ? order.items.map(i => {
+        const varName = i.selectedVariation?.name || i.selectedOption || null;
+        const varBadge = varName
+          ? `<span style="display:inline-block;background:#E0F9F6;color:#0D8E82;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:700;margin-left:6px;">${varName}</span>`
+          : "";
+        return `<tr>
+          <td style="padding:8px 0;font-size:14px;color:#39393F;border-bottom:1px solid #f0f0f0;">
+            ${i.name}${varBadge} <span style="color:#888;">× ${i.qty}</span>
+          </td>
+          <td style="padding:8px 0;font-size:14px;font-weight:700;text-align:right;color:#39393F;border-bottom:1px solid #f0f0f0;">
             ₹${(Number(i.price || 0) * i.qty).toLocaleString("en-IN")}
           </td>
-        </tr>`).join("")
+        </tr>`;
+      }).join("")
     : `<tr><td colspan="2" style="font-size:14px;padding:8px 0;">See order details</td></tr>`;
 
-  const addrBlock = deliveryAddress
-    ? `<div style="background:#F0F9FF;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
-        <p style="margin:0 0 8px;font-size:12px;color:#888;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">📦 Delivery Address</p>
-        <p style="margin:0;font-size:14px;line-height:1.8;color:#2D1F2B;">${deliveryAddress}</p>
+  // Parse Instagram out of the delivery address string if present
+  let addrDisplay = deliveryAddress || "";
+  let igLine = "";
+  if (addrDisplay) {
+    const igMatch = addrDisplay.match(/Instagram:\s*(@?\S+)/i);
+    if (igMatch) {
+      const handle = igMatch[1].replace(/^@/,"");
+      igLine = `<p style="margin:6px 0 0;font-size:13px;color:#555;">
+        📸 Instagram: <a href="https://instagram.com/${handle}" style="color:#17C3B2;font-weight:700;">@${handle}</a>
+      </p>`;
+    }
+  }
+
+  const addrBlock = addrDisplay
+    ? `<div style="background:#F0FCF9;border-radius:10px;padding:16px 20px;margin-bottom:20px;border-left:4px solid #17C3B2;">
+        <p style="margin:0 0 8px;font-size:12px;color:#888;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">📦 Delivery Details</p>
+        <p style="margin:0;font-size:14px;line-height:1.9;color:#39393F;white-space:pre-line;">${addrDisplay}</p>
+        ${igLine}
        </div>`
     : "";
 
   return `
-    <div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;padding:32px 24px;background:#fff;">
-      <div style="background:linear-gradient(135deg,#FFD6E7,#FFF3CD);padding:24px;border-radius:14px;text-align:center;margin-bottom:24px;">
-        <h1 style="margin:0;font-size:26px;color:#2D1F2B;">🌸 New Order!</h1>
-        <p style="margin:10px 0 0;color:#7C5C72;font-size:15px;">
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#fff;">
+      <div style="background:linear-gradient(135deg,#17C3B2,#13AFA0);padding:28px 24px;border-radius:16px;text-align:center;margin-bottom:24px;">
+        <img src="https://bloomhq.in/bloom-logo.png" alt="Bloom" style="height:48px;margin-bottom:12px;filter:brightness(0) invert(1);"/>
+        <h1 style="margin:0;font-size:28px;color:#fff;font-family:Georgia,serif;">New Order! 🌸</h1>
+        <p style="margin:10px 0 0;color:rgba(255,255,255,0.85);font-size:15px;">
           You have a new order on <strong>${storeName}</strong>
         </p>
       </div>
-      <div style="background:#F9F5FF;border-radius:10px;padding:20px;margin-bottom:20px;">
+      <div style="background:#F9FFFE;border-radius:12px;padding:20px;margin-bottom:20px;border:1px solid #E0F9F6;">
         <p style="margin:0 0 10px;font-size:12px;color:#888;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">🧾 Order Details</p>
-        <p style="margin:0 0 4px;font-size:14px;"><strong>Order ID:</strong> ${order.id || "—"}</p>
-        <p style="margin:0 0 16px;font-size:14px;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
-        <table style="width:100%;border-collapse:collapse;border-top:1px solid #e0d0f0;">
+        <p style="margin:0 0 4px;font-size:14px;color:#39393F;"><strong>Order ID:</strong> ${order.id || "—"}</p>
+        <p style="margin:0 0 16px;font-size:14px;color:#39393F;"><strong>Customer:</strong> ${order.customer_name || "—"}</p>
+        <table style="width:100%;border-collapse:collapse;">
           ${itemList}
-          <tr style="border-top:2px solid #E8A0BE;">
-            <td style="padding:10px 0;font-size:15px;font-weight:700;">Total</td>
-            <td style="padding:10px 0;font-size:20px;font-weight:700;color:#C85A8A;text-align:right;">
+          <tr>
+            <td style="padding:12px 0 0;font-size:15px;font-weight:700;color:#39393F;">Total</td>
+            <td style="padding:12px 0 0;font-size:22px;font-weight:700;color:#17C3B2;text-align:right;">
               ₹${Number(order.amount || 0).toLocaleString("en-IN")}
             </td>
           </tr>
@@ -387,8 +411,9 @@ function buildOrderEmailHtml({ storeName, order, deliveryAddress }) {
       </div>
       ${addrBlock}
       <p style="font-size:13px;color:#aaa;text-align:center;margin-top:24px;">
-        Log in to your <a href="https://bloomhq.in" style="color:#C85A8A;">Bloom dashboard</a> to manage this order.
+        Log in to your <a href="https://bloomhq.in" style="color:#17C3B2;font-weight:700;">Bloom dashboard</a> to manage this order.
       </p>
+      <p style="font-size:11px;color:#ccc;text-align:center;margin-top:8px;">bloomhq.in · Made with 🌸 in India</p>
     </div>`;
 }
 
