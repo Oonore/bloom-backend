@@ -809,16 +809,60 @@ app.get("/api/customer/find", async (req, res) => {
 });
 
 // ─── PATCH bloom_customers ────────────────────────────────────────────────────
+// Three-layer fallback: PostgREST → pg-meta raw SQL → direct pg (DATABASE_URL)
 app.patch("/api/customer/:id", async (req, res) => {
   if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  const id   = req.params.id;
+  const body = req.body;
+
+  // ── Layer 1: PostgREST (fast, works once schema cache is fresh) ───────────
   try {
     const r = await fetch(
-      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(req.params.id)}`,
-      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(body) }
     );
-    if (!r.ok) { const d=await r.json(); return res.status(r.status).json({ error:JSON.stringify(d) }); }
-    return res.json({ ok:true });
+    if (r.ok) return res.json({ ok: true });
+    const errText = await r.text();
+    if (!errText.includes("schema cache") && !errText.includes("PGRST204")) {
+      return res.status(r.status).json({ error: errText });
+    }
+    console.warn("⚠️  PostgREST schema cache stale (customers) — trying raw SQL fallback");
   } catch(e) { return res.status(500).json({ error: e.message }); }
+
+  // ── Layer 2: pg-meta /query raw SQL (bypasses PostgREST schema cache) ─────
+  const sql = buildUpdateSQL("bloom_customers", id, body);
+  if (sql) {
+    try {
+      const pgMetaHdr = { "Authorization": `Bearer ${process.env.SUPA_KEY}`, "Content-Type": "application/json" };
+      const qRes = await fetch(`${su()}/pg-meta/v1/query`, {
+        method:"POST", headers: pgMetaHdr,
+        body: JSON.stringify({ query: sql + "; NOTIFY pgrst, 'reload schema'" }),
+      });
+      if (qRes.ok) {
+        console.log("✅ pg-meta raw SQL PATCH (customers) succeeded");
+        return res.json({ ok: true });
+      }
+      console.warn("⚠️  pg-meta /query failed:", qRes.status, await qRes.text());
+    } catch(e) { console.warn("⚠️  pg-meta /query error:", e.message); }
+  }
+
+  // ── Layer 3: Direct pg connection via DATABASE_URL ────────────────────────
+  if (process.env.DATABASE_URL) {
+    try {
+      const { Pool } = require("pg");
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+      const keys = Object.keys(body);
+      const vals = Object.values(body);
+      const setClause = keys.map((k, i) => `"${k}" = $${i + 1}`).join(", ");
+      await pool.query(`UPDATE bloom_customers SET ${setClause} WHERE id = $${keys.length + 1}`, [...vals, id]);
+      await pool.query("SELECT pg_notify('pgrst', 'reload schema')");
+      pool.end();
+      console.log("✅ DATABASE_URL direct PATCH (customers) succeeded");
+      return res.json({ ok: true });
+    } catch(e) { console.error("⚠️  DATABASE_URL PATCH (customers) failed:", e.message); }
+  }
+
+  return res.status(500).json({ error: "All save methods exhausted — schema cache is stale and no direct DB access." });
 });
 
 // ─── POST bloom_customers ─────────────────────────────────────────────────────
