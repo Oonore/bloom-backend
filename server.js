@@ -741,6 +741,20 @@ app.post("/api/customer", async (req, res) => {
   } catch(e) { return res.status(500).json({ error: e.message }); }
 });
 
+// ─── GET bloom_payouts (admin fetch via service key) ─────────────────────────
+app.get("/api/payouts", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_payouts?order=paid_at.desc`,
+      { headers: sh() }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? data : []);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
 // ─── POST bloom_payouts (mark as paid) ───────────────────────────────────────
 app.post("/api/payout", async (req, res) => {
   if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
