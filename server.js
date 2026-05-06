@@ -26,15 +26,11 @@ const RESEND_KEY = process.env.RESEND_KEY;
 const FAST2SMS_KEY = process.env.FAST2SMS_KEY;
 
 // ─── DB AUTO-MIGRATION ────────────────────────────────────────────────────────
-// Adds any missing columns to bloom_users on every startup (IF NOT EXISTS = safe to re-run).
-// Requires DATABASE_URL env var on Render (get it from Supabase → Settings → Database → URI).
+// PRIMARY: DATABASE_URL (direct postgres) — set on Render from Supabase connection string
 if (process.env.DATABASE_URL) {
   try {
     const { Pool } = require("pg");
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
-    });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
     pool.query(`
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS instagram      text;
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS phone          text;
@@ -47,15 +43,89 @@ if (process.env.DATABASE_URL) {
       ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS profile_image text;
       ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS upi_id       text;
       ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS password_hash text;
+      CREATE TABLE IF NOT EXISTS bloom_payouts (
+        id       text PRIMARY KEY,
+        store_id text NOT NULL,
+        amount   numeric NOT NULL DEFAULT 0,
+        note     text,
+        paid_at  timestamptz DEFAULT now()
+      );
     `)
-      .then(() => { console.log("✅ bloom_users schema up to date"); pool.end(); })
-      .catch(e  => { console.error("⚠️  DB migration failed:", e.message);  pool.end(); });
+      .then(() => { console.log("✅ Schema migration (DATABASE_URL) complete"); pool.end(); })
+      .catch(e  => { console.error("⚠️  DB migration failed:", e.message); pool.end(); });
   } catch (e) {
     console.error("⚠️  pg not available:", e.message);
   }
 } else {
-  console.warn("⚠️  DATABASE_URL not set — skipping auto-migration (add it on Render)");
+  console.warn("⚠️  DATABASE_URL not set — will use pg-meta fallback");
 }
+
+// FALLBACK: Supabase pg-meta API — runs on every startup, no DATABASE_URL needed
+async function ensureSchemaViaPgMeta() {
+  const SUPA_URL = process.env.SUPA_URL;
+  const SUPA_KEY = process.env.SUPA_KEY;
+  if (!SUPA_URL || !SUPA_KEY) return;
+  const base = `${SUPA_URL}/pg-meta/v1`;
+  const hdr  = { "Authorization": `Bearer ${SUPA_KEY}`, "Content-Type": "application/json" };
+
+  try {
+    // ── 1. Fetch all tables ──────────────────────────────────────────────────
+    const tabRes = await fetch(`${base}/tables?limit=500`, { headers: hdr });
+    if (!tabRes.ok) { console.warn("pg-meta /tables failed:", tabRes.status); return; }
+    const tables = await tabRes.json();
+    if (!Array.isArray(tables)) return;
+
+    // ── 2. Ensure bloom_payouts exists ───────────────────────────────────────
+    const payoutsTable = tables.find(t => t.name === "bloom_payouts");
+    if (!payoutsTable) {
+      const r = await fetch(`${base}/tables`, {
+        method: "POST", headers: hdr,
+        body: JSON.stringify({ name: "bloom_payouts", schema: "public" }),
+      });
+      if (r.ok) {
+        const created = await r.json();
+        // Add columns to newly created table
+        for (const col of [
+          { name:"id",       type:"text",    is_nullable:false, is_primary_key:true },
+          { name:"store_id", type:"text",    is_nullable:false },
+          { name:"amount",   type:"numeric", is_nullable:false, default_value:"0" },
+          { name:"note",     type:"text",    is_nullable:true  },
+          { name:"paid_at",  type:"timestamptz", is_nullable:true, default_value:"now()" },
+        ]) {
+          await fetch(`${base}/columns`, {
+            method:"POST", headers:hdr,
+            body: JSON.stringify({ table_id: created.id, ...col }),
+          });
+        }
+        console.log("✅ pg-meta: bloom_payouts table created");
+      }
+    }
+
+    // ── 3. Ensure bloom_customers has needed columns ──────────────────────────
+    const custTable = tables.find(t => t.name === "bloom_customers");
+    if (!custTable) { console.warn("pg-meta: bloom_customers not found"); return; }
+
+    const colRes = await fetch(`${base}/columns?table_id=${custTable.id}`, { headers: hdr });
+    if (!colRes.ok) return;
+    const cols    = await colRes.json();
+    const existing = new Set(Array.isArray(cols) ? cols.map(c => c.name) : []);
+
+    const needed = ["instagram", "profile_image", "upi_id", "password_hash"];
+    for (const name of needed) {
+      if (!existing.has(name)) {
+        const r = await fetch(`${base}/columns`, {
+          method:"POST", headers:hdr,
+          body: JSON.stringify({ table_id: custTable.id, name, type:"text", is_nullable:true }),
+        });
+        console.log(r.ok ? `✅ pg-meta: added '${name}' to bloom_customers` : `⚠️  pg-meta: failed to add '${name}' (${r.status})`);
+      }
+    }
+    console.log("✅ pg-meta schema check complete");
+  } catch(e) {
+    console.error("⚠️  pg-meta migration error:", e.message);
+  }
+}
+ensureSchemaViaPgMeta();
 
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
@@ -668,6 +738,33 @@ app.post("/api/customer", async (req, res) => {
     const data = await r.json();
     if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
     return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── POST bloom_payouts (mark as paid) ───────────────────────────────────────
+app.post("/api/payout", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_payouts`,
+      { method:"POST", headers:{...sh(),"Prefer":"return=representation"}, body:JSON.stringify(req.body) }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? (data[0] || req.body) : data);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── DELETE bloom_payouts ─────────────────────────────────────────────────────
+app.delete("/api/payout/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_payouts?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"DELETE", headers:sh() }
+    );
+    if (!r.ok) { const d = await r.text(); return res.status(r.status).json({ error: d }); }
+    return res.json({ ok: true });
   } catch(e) { return res.status(500).json({ error: e.message }); }
 });
 
