@@ -865,6 +865,30 @@ app.patch("/api/customer/:id", async (req, res) => {
   return res.status(500).json({ error: "All save methods exhausted — schema cache is stale and no direct DB access." });
 });
 
+// ─── GET bloom_customers (admin fetch via service key) ────────────────────────
+app.get("/api/customers", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(`${su()}/rest/v1/bloom_customers?order=created_at.asc`, { headers: sh() });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? data : []);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── DELETE bloom_customers ───────────────────────────────────────────────────
+app.delete("/api/customer/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"DELETE", headers: sh() }
+    );
+    if (!r.ok) { const d = await r.text(); return res.status(r.status).json({ error: d }); }
+    return res.json({ ok: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
 // ─── POST bloom_customers ─────────────────────────────────────────────────────
 app.post("/api/customer", async (req, res) => {
   if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
