@@ -877,11 +877,19 @@ app.get("/api/customers", async (req, res) => {
 });
 
 // ─── DELETE bloom_customers ───────────────────────────────────────────────────
+// Deletes orders first (FK constraint), then the customer row
 app.delete("/api/customer/:id", async (req, res) => {
   if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  const id = req.params.id;
   try {
+    // Step 1: delete all orders belonging to this customer
+    await fetch(
+      `${su()}/rest/v1/bloom_orders?customer_id=eq.${encodeURIComponent(id)}`,
+      { method:"DELETE", headers: sh() }
+    );
+    // Step 2: delete the customer row
     const r = await fetch(
-      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(req.params.id)}`,
+      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(id)}`,
       { method:"DELETE", headers: sh() }
     );
     if (!r.ok) { const d = await r.text(); return res.status(r.status).json({ error: d }); }
