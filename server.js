@@ -41,8 +41,12 @@ if (process.env.DATABASE_URL) {
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS shipping_cost  integer DEFAULT 0;
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS dispatch_days  text    DEFAULT '3-5 days';
       ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS mailersend_key text;
+      ALTER TABLE bloom_users ADD COLUMN IF NOT EXISTS store_image    text;
       ALTER TABLE bloom_products ADD COLUMN IF NOT EXISTS is_pinned   boolean DEFAULT false;
-      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS instagram   text;
+      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS instagram     text;
+      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS profile_image text;
+      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS upi_id       text;
+      ALTER TABLE bloom_customers ADD COLUMN IF NOT EXISTS password_hash text;
     `)
       .then(() => { console.log("✅ bloom_users schema up to date"); pool.end(); })
       .catch(e  => { console.error("⚠️  DB migration failed:", e.message);  pool.end(); });
@@ -621,6 +625,35 @@ app.patch("/api/order/:id", async (req, res) => {
     );
     if (!r.ok) return res.status(r.status).json({ error: await r.text() });
     return res.json({ success: true });
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── GET bloom_customers by email (used for login + duplicate check) ──────────
+app.get("/api/customer/find", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  const email = (req.query.email || "").toLowerCase().trim();
+  if (!email) return res.status(400).json({ error: "email required" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_customers?email=eq.${encodeURIComponent(email)}&limit=1`,
+      { headers: sh() }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: JSON.stringify(data) });
+    return res.json(Array.isArray(data) ? data : []);
+  } catch(e) { return res.status(500).json({ error: e.message }); }
+});
+
+// ─── PATCH bloom_customers ────────────────────────────────────────────────────
+app.patch("/api/customer/:id", async (req, res) => {
+  if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured" });
+  try {
+    const r = await fetch(
+      `${su()}/rest/v1/bloom_customers?id=eq.${encodeURIComponent(req.params.id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+    );
+    if (!r.ok) { const d=await r.json(); return res.status(r.status).json({ error:JSON.stringify(d) }); }
+    return res.json({ ok:true });
   } catch(e) { return res.status(500).json({ error: e.message }); }
 });
 
