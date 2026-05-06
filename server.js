@@ -641,16 +641,74 @@ function sh() {
 function su() { return process.env.SUPA_URL; }
 
 // ─── PATCH bloom_users ────────────────────────────────────────────────────────
+// Three-layer fallback: PostgREST → pg-meta raw SQL → direct pg (DATABASE_URL)
+function buildUpdateSQL(table, id, data) {
+  const keys = Object.keys(data);
+  if (!keys.length) return null;
+  const setParts = keys.map(k => {
+    const v = data[k];
+    if (v === null || v === undefined) return `"${k}" = NULL`;
+    if (typeof v === "number") return `"${k}" = ${Number(v)}`;
+    if (typeof v === "object") return `"${k}" = '${JSON.stringify(v).replace(/'/g,"''")}'::jsonb`;
+    return `"${k}" = '${String(v).replace(/'/g,"''")}'`;
+  });
+  const safeId = String(id).replace(/'/g,"''");
+  return `UPDATE public.${table} SET ${setParts.join(", ")} WHERE id = '${safeId}'`;
+}
+
 app.patch("/api/user/:id", async (req, res) => {
   if (!su() || !process.env.SUPA_KEY) return res.status(503).json({ error: "Supabase not configured on server" });
+  const id   = req.params.id;
+  const body = req.body;
+
+  // ── Layer 1: PostgREST (fast, works once schema cache is fresh) ───────────
   try {
     const r = await fetch(
-      `${su()}/rest/v1/bloom_users?id=eq.${encodeURIComponent(req.params.id)}`,
-      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(req.body) }
+      `${su()}/rest/v1/bloom_users?id=eq.${encodeURIComponent(id)}`,
+      { method:"PATCH", headers:{...sh(),"Prefer":"return=minimal"}, body:JSON.stringify(body) }
     );
-    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
-    return res.json({ success: true });
+    if (r.ok) return res.json({ success: true });
+    const errText = await r.text();
+    if (!errText.includes("schema cache") && !errText.includes("PGRST204")) {
+      return res.status(r.status).json({ error: errText });
+    }
+    console.warn("⚠️  PostgREST schema cache stale — trying raw SQL fallback");
   } catch(e) { return res.status(500).json({ error: e.message }); }
+
+  // ── Layer 2: pg-meta /query raw SQL (bypasses PostgREST schema cache) ─────
+  const sql = buildUpdateSQL("bloom_users", id, body);
+  if (sql) {
+    try {
+      const pgMetaHdr = { "Authorization": `Bearer ${process.env.SUPA_KEY}`, "Content-Type": "application/json" };
+      const qRes = await fetch(`${su()}/pg-meta/v1/query`, {
+        method:"POST", headers: pgMetaHdr,
+        body: JSON.stringify({ query: sql + "; NOTIFY pgrst, 'reload schema'" }),
+      });
+      if (qRes.ok) {
+        console.log("✅ pg-meta raw SQL PATCH succeeded");
+        return res.json({ success: true });
+      }
+      console.warn("⚠️  pg-meta /query failed:", qRes.status, await qRes.text());
+    } catch(e) { console.warn("⚠️  pg-meta /query error:", e.message); }
+  }
+
+  // ── Layer 3: Direct pg connection via DATABASE_URL ────────────────────────
+  if (process.env.DATABASE_URL) {
+    try {
+      const { Pool } = require("pg");
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+      const keys = Object.keys(body);
+      const vals = Object.values(body);
+      const setClause = keys.map((k, i) => `"${k}" = $${i + 1}`).join(", ");
+      await pool.query(`UPDATE bloom_users SET ${setClause} WHERE id = $${keys.length + 1}`, [...vals, id]);
+      await pool.query("SELECT pg_notify('pgrst', 'reload schema')");
+      pool.end();
+      console.log("✅ DATABASE_URL direct PATCH succeeded");
+      return res.json({ success: true });
+    } catch(e) { console.error("⚠️  DATABASE_URL PATCH failed:", e.message); }
+  }
+
+  return res.status(500).json({ error: "All save methods exhausted — schema cache is stale and no direct DB access." });
 });
 
 // ─── POST bloom_users (signup) ────────────────────────────────────────────────
