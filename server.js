@@ -101,25 +101,49 @@ async function ensureSchemaViaPgMeta() {
       }
     }
 
-    // ── 3. Ensure bloom_customers has needed columns ──────────────────────────
-    const custTable = tables.find(t => t.name === "bloom_customers");
-    if (!custTable) { console.warn("pg-meta: bloom_customers not found"); return; }
-
-    const colRes = await fetch(`${base}/columns?table_id=${custTable.id}`, { headers: hdr });
-    if (!colRes.ok) return;
-    const cols    = await colRes.json();
-    const existing = new Set(Array.isArray(cols) ? cols.map(c => c.name) : []);
-
-    const needed = ["instagram", "profile_image", "upi_id", "password_hash"];
-    for (const name of needed) {
-      if (!existing.has(name)) {
-        const r = await fetch(`${base}/columns`, {
-          method:"POST", headers:hdr,
-          body: JSON.stringify({ table_id: custTable.id, name, type:"text", is_nullable:true }),
-        });
-        console.log(r.ok ? `✅ pg-meta: added '${name}' to bloom_customers` : `⚠️  pg-meta: failed to add '${name}' (${r.status})`);
+    // Helper: add missing text columns to a table
+    async function ensureCols(table, needed, extraTypes = {}) {
+      if (!table) return;
+      const res = await fetch(`${base}/columns?table_id=${table.id}`, { headers: hdr });
+      if (!res.ok) return;
+      const cols = await res.json();
+      const existing = new Set(Array.isArray(cols) ? cols.map(c => c.name) : []);
+      for (const name of needed) {
+        if (!existing.has(name)) {
+          const r = await fetch(`${base}/columns`, {
+            method:"POST", headers:hdr,
+            body: JSON.stringify({ table_id: table.id, name, type: extraTypes[name] || "text", is_nullable:true }),
+          });
+          console.log(r.ok ? `✅ pg-meta: added '${name}' to ${table.name}` : `⚠️  pg-meta: failed '${name}' on ${table.name} (${r.status})`);
+        }
       }
     }
+
+    // ── 3. Ensure bloom_users has all needed columns ──────────────────────────
+    const usersTable = tables.find(t => t.name === "bloom_users");
+    await ensureCols(usersTable,
+      ["instagram", "phone", "store_image", "store_desc", "mailersend_key", "dispatch_days", "collections"],
+      { shipping_cost: "integer", collections: "jsonb" }
+    );
+    // shipping_cost needs integer type — handle separately
+    if (usersTable) {
+      const scRes = await fetch(`${base}/columns?table_id=${usersTable.id}`, { headers: hdr });
+      if (scRes.ok) {
+        const scCols = await scRes.json();
+        if (Array.isArray(scCols) && !scCols.find(c => c.name === "shipping_cost")) {
+          const r = await fetch(`${base}/columns`, {
+            method:"POST", headers:hdr,
+            body: JSON.stringify({ table_id: usersTable.id, name:"shipping_cost", type:"integer", is_nullable:true, default_value:"0" }),
+          });
+          console.log(r.ok ? `✅ pg-meta: added 'shipping_cost' to bloom_users` : `⚠️  pg-meta: failed 'shipping_cost' (${r.status})`);
+        }
+      }
+    }
+
+    // ── 4. Ensure bloom_customers has needed columns ──────────────────────────
+    const custTable = tables.find(t => t.name === "bloom_customers");
+    await ensureCols(custTable, ["instagram", "profile_image", "upi_id", "password_hash"]);
+
     console.log("✅ pg-meta schema check complete");
   } catch(e) {
     console.error("⚠️  pg-meta migration error:", e.message);
