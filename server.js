@@ -390,7 +390,7 @@ function buildOrderEmailHtml({ storeName, order, deliveryAddress }) {
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#fff;">
       <div style="background:linear-gradient(135deg,#17C3B2,#13AFA0);padding:28px 24px;border-radius:16px;text-align:center;margin-bottom:24px;">
         <img src="https://bloomhq.in/bloom-logo.png" alt="Bloom" style="height:48px;margin-bottom:12px;filter:brightness(0) invert(1);"/>
-        <h1 style="margin:0;font-size:28px;color:#fff;font-family:Georgia,serif;">New Order! 🌸</h1>
+        <h1 style="margin:0;font-size:28px;color:#fff;font-family:Arial,sans-serif;font-weight:700;letter-spacing:-0.5px;">New Order!</h1>
         <p style="margin:10px 0 0;color:rgba(255,255,255,0.85);font-size:15px;">
           You have a new order on <strong>${storeName}</strong>
         </p>
@@ -423,7 +423,7 @@ async function sendOrderNotificationEmail({ toEmail, toName, storeName, order, d
   if (!toEmail || !RESEND_KEY) return;
   try {
     const html    = buildOrderEmailHtml({ storeName, order, deliveryAddress });
-    const subject = `🌸 New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`;
+    const subject = `New order on ${storeName} — ₹${Number(order.amount || 0).toLocaleString("en-IN")}`;
     const res = await fetch("https://api.resend.com/emails", {
       method:  "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RESEND_KEY}` },
