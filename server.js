@@ -590,6 +590,9 @@ async function updateOrderInSupabase(bloomOrderId, updates) {
   }
 }
 
+// ─── PING (used by frontend to wake Render before saving) ────────────────────
+app.get("/ping", (_req, res) => res.json({ ok: true }));
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  DATA PROXY — all writes go through here so the service-role key bypasses RLS
 // ══════════════════════════════════════════════════════════════════════════════
