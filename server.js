@@ -144,6 +144,15 @@ async function ensureSchemaViaPgMeta() {
     const custTable = tables.find(t => t.name === "bloom_customers");
     await ensureCols(custTable, ["instagram", "profile_image", "upi_id", "password_hash"]);
 
+    // ── 5. Reload PostgREST schema cache so new columns are visible immediately
+    try {
+      await fetch(`${base}/query`, {
+        method: "POST", headers: hdr,
+        body: JSON.stringify({ query: "SELECT pg_notify('pgrst', 'reload schema')" }),
+      });
+      console.log("✅ pg-meta: PostgREST schema cache reloaded");
+    } catch(_) { /* non-fatal — PostgREST reloads on its own interval anyway */ }
+
     console.log("✅ pg-meta schema check complete");
   } catch(e) {
     console.error("⚠️  pg-meta migration error:", e.message);
